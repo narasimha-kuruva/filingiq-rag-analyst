@@ -138,6 +138,7 @@ class DualVectorStore:
                 "successful": False
             }
             
+        filenames = set()
         for i, doc in enumerate(documents):
             if not isinstance(doc, Document):
                 logger.error("Validation failed: Document at index %d is not a LangChain Document instance.", i)
@@ -149,8 +150,56 @@ class DualVectorStore:
                     "count_after": 0,
                     "successful": False
                 }
-            if not doc.metadata.get("source_filename"):
-                logger.error("Validation failed: Document at index %d has no source_filename metadata.", i)
+            
+            meta = doc.metadata or {}
+            
+            # Validate source_filename
+            sf = meta.get("source_filename")
+            if not sf or not isinstance(sf, str) or not sf.strip():
+                logger.error("Validation failed: Document at index %d is missing required metadata field 'source_filename'.", i)
+                return {
+                    "exists": False,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": 0,
+                    "count_after": 0,
+                    "successful": False
+                }
+            filenames.add(sf)
+                
+            # Validate file_type
+            ft = meta.get("file_type")
+            if not ft or not isinstance(ft, str) or not ft.strip():
+                logger.error("Validation failed: Document at index %d is missing required metadata field 'file_type'.", i)
+                return {
+                    "exists": False,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": 0,
+                    "count_after": 0,
+                    "successful": False
+                }
+                
+            # Validate chunk_index or row_index or paragraph_index
+            has_index = (
+                ("chunk_index" in meta and meta["chunk_index"] is not None) or
+                ("row_index" in meta and meta["row_index"] is not None) or
+                ("paragraph_index" in meta and meta["paragraph_index"] is not None)
+            )
+            if not has_index:
+                logger.error("Validation failed: Document at index %d is missing required metadata index (chunk_index, row_index, or paragraph_index).", i)
+                return {
+                    "exists": False,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": 0,
+                    "count_after": 0,
+                    "successful": False
+                }
+                
+            # Validate chunk_text (page_content)
+            if not doc.page_content or not isinstance(doc.page_content, str) or not doc.page_content.strip():
+                logger.error("Validation failed: Document at index %d is missing required 'page_content' (chunk_text).", i)
                 return {
                     "exists": False,
                     "deleted": 0,
@@ -160,7 +209,19 @@ class DualVectorStore:
                     "successful": False
                 }
 
-        filename = documents[0].metadata.get("source_filename")
+        # 3. Verify that every document passed into replace_file() belongs to the same source_filename
+        if len(filenames) > 1:
+            logger.error("Validation failed: Multiple source filenames detected in the document batch: %s", filenames)
+            return {
+                "exists": False,
+                "deleted": 0,
+                "inserted": 0,
+                "count_before": 0,
+                "count_after": 0,
+                "successful": False
+            }
+
+        filename = list(filenames)[0]
         
         # Get target store
         store = self._get_store(collection_target)
@@ -171,6 +232,7 @@ class DualVectorStore:
         # 2. Generate deterministic IDs before deletion
         try:
             ids = [self._generate_content_id(doc) for doc in documents]
+            duplicate_id_count = len(ids) - len(set(ids))
         except Exception as e:
             logger.error("Failed to generate deterministic IDs for file '%s': %s", filename, e, exc_info=True)
             return {
@@ -213,7 +275,17 @@ class DualVectorStore:
                 logger.error("Failed to delete existing files for '%s' in replace_file: %s", filename, e, exc_info=True)
                 # If deletion failed, we abort the replacement to avoid duplicate/inconsistent state
                 count_after = self.get_document_count(collection_target)
-                self._log_upload_metrics(filename, exists, collection_target, count_before, deleted_count=0, inserted_count=0, count_after=count_after, successful=False)
+                self._log_upload_metrics(
+                    filename=filename,
+                    exists=exists,
+                    collection_target=collection_target,
+                    count_before=count_before,
+                    deleted_count=0,
+                    inserted_count=0,
+                    count_after=count_after,
+                    duplicate_id_count=duplicate_id_count,
+                    successful=False
+                )
                 return {
                     "exists": exists,
                     "deleted": 0,
@@ -235,14 +307,15 @@ class DualVectorStore:
 
         # Log metrics
         self._log_upload_metrics(
-            filename,
-            exists,
-            collection_target,
-            count_before,
-            deleted_count if successful else 0,
-            len(documents) if successful else 0,
-            count_after,
-            successful
+            filename=filename,
+            exists=exists,
+            collection_target=collection_target,
+            count_before=count_before,
+            deleted_count=deleted_count if successful else 0,
+            inserted_count=len(documents) if successful else 0,
+            count_after=count_after,
+            duplicate_id_count=duplicate_id_count,
+            successful=successful
         )
 
         return {
@@ -263,6 +336,7 @@ class DualVectorStore:
         deleted_count: int,
         inserted_count: int,
         count_after: int,
+        duplicate_id_count: int,
         successful: bool
     ) -> None:
         log_msg = (
@@ -276,6 +350,10 @@ class DualVectorStore:
             f"Deleted:\n{deleted_count}\n\n"
             f"Inserted:\n{inserted_count}\n\n"
             f"Documents After:\n{count_after}\n\n"
+            f"Deleted IDs count:\n{deleted_count}\n\n"
+            f"Inserted IDs count:\n{inserted_count}\n\n"
+            f"Final unique document count:\n{count_after}\n\n"
+            f"Duplicate ID count (expected: 0):\n{duplicate_id_count}\n\n"
             f"Replacement Successful:\n{successful}"
         )
         logger.info(log_msg)

@@ -138,6 +138,32 @@ def run_tests():
         print(f"  Is relevant: {res_4.is_relevant}")
         assert not res_4.is_relevant, "Query 4 should be marked irrelevant (below threshold)!"
 
+        # ── Test Validation Constraints ────────────────────────────────
+        print("\nTesting Validation Constraints...")
+        from langchain_core.documents import Document
+        
+        # Test Case A: Document without required metadata (missing file_type)
+        invalid_doc_1 = Document(
+            page_content="Test text",
+            metadata={"source_filename": "test.txt", "chunk_index": 0}
+        )
+        res_val_1 = vector_store.replace_file([invalid_doc_1], "narrative")
+        print(f"  Missing file_type validation test: success={res_val_1['successful']}")
+        assert res_val_1['successful'] is False, "Should abort replacement if file_type metadata is missing!"
+        
+        # Test Case B: Multiple filenames in batch
+        invalid_doc_2a = Document(
+            page_content="Text A",
+            metadata={"source_filename": "file_a.txt", "file_type": "txt", "chunk_index": 0}
+        )
+        invalid_doc_2b = Document(
+            page_content="Text B",
+            metadata={"source_filename": "file_b.txt", "file_type": "txt", "chunk_index": 0}
+        )
+        res_val_2 = vector_store.replace_file([invalid_doc_2a, invalid_doc_2b], "narrative")
+        print(f"  Multiple filenames validation test: success={res_val_2['successful']}")
+        assert res_val_2['successful'] is False, "Should abort replacement if multiple source filenames are in the batch!"
+
         print("\n✅ All retrieval and scoring database tests passed successfully!")
 
     finally:
