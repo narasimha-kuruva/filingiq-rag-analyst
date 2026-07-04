@@ -6,45 +6,58 @@
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture & Layered Boundaries
+
+FilingIQ is built with a strictly decoupled, layered architecture to maintain a clean separation of concerns:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        STREAMLIT UI                              │
-│  ┌─────────────┐  ┌──────────────────────────────────────────┐  │
-│  │  Sidebar     │  │  Chat Interface                          │  │
-│  │  • Upload    │  │  • User/Assistant messages               │  │
-│  │  • File list │  │  • Source expanders with similarity      │  │
-│  │  • Clear     │  │    scores and metadata                   │  │
-│  └──────┬──────┘  └──────────────────┬───────────────────────┘  │
-│         │                            │                           │
-└─────────┼────────────────────────────┼───────────────────────────┘
-          │                            │
-          ▼                            ▼
-┌─────────────────┐         ┌─────────────────────┐
-│  INGESTION       │         │  GENERATION          │
-│  ROUTER          │         │  Gemini 1.5 Flash    │
-│  ┌─────────────┐ │         │  (temp=0.15)         │
-│  │ PDF Loader  │ │         │  + Grounding Prompt  │
-│  │ DOCX Loader │ │         └──────────┬──────────┘
-│  │ TXT Loader  │ │                    │
-│  │ Excel Loader│ │                    ▼
-│  │ CSV Loader  │ │         ┌─────────────────────┐
-│  └──────┬──────┘ │         │  RETRIEVER           │
-│         │        │         │  • Query both stores  │
-│         │        │         │  • Threshold filter   │
-└─────────┼────────┘         │  • Tag [NARRATIVE]   │
-          │                  │    or [STRUCTURED]   │
-          ▼                  └──────────┬──────────┘
-┌────────────────────────────────────────┐
-│          ChromaDB (Persistent)          │
-│  ┌──────────────┐  ┌────────────────┐  │
-│  │ narrative_    │  │ structured_    │  │
-│  │ store         │  │ store          │  │
-│  │ (PDF,DOCX,TXT)│  │ (XLSX, CSV)   │  │
-│  └──────────────┘  └────────────────┘  │
-└────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                      UI Layer                          │
+│                   (app.py UI)                          │
+└───────────┬─────────────────────────────────┬──────────┘
+            │ (User Upload)                   │ (Natural Language Query)
+            ▼                                 ▼
+┌───────────────────────┐           ┌────────────────────┐
+│     Utility Layer     │           │  Generation Layer  │
+│  (utils/file_hash.py) │           │ (generation/llm)   │
+└───────────┬───────────┘           └─────────▲──────────┘
+            │                                 │
+            ▼                                 │ (Grounded Response)
+┌───────────────────────┐           ┌─────────┴──────────┐
+│    Ingestion Layer    │           │  Retriever Layer   │
+│  (ingestion/loaders)  │           │ (retrieval/search) │
+└───────────┬───────────┘           └─────────▲──────────┘
+            │ (Document Chunks)               │
+            ▼                                 │ (Similarity Retrieve)
+┌─────────────────────────────────────────────┴──────────┐
+│                 Vector Store Layer                     │
+│            (retrieval/vector_store.py)                 │
+│  • Storage-focused operations (Index / Skip / Replace) │
+│  • Idempotency management & ChromaDB metadata query    │
+└────────────────────────────────────────────────────────┘
 ```
+
+### Layer Responsibilities
+* **UI Layer (`app.py`)**: Manages the Streamlit interface, chat history state, file upload events, and triggers the ingestion pipeline.
+* **Utility Layer (`utils/file_hash.py`)**: Handles standalone file hash generation using SHA256 hashes of entire files.
+* **Ingestion Layer (`ingestion/`)**: Dispatches files to type-specific loaders, generates text chunks, and initializes chunk-level metadata.
+* **Vector Store Layer (`retrieval/vector_store.py`)**: Manages ChromaDB collections. Handles version detection, deterministic metadata-based chunk IDs, and safe document replacement (`sync_document()`).
+* **Retriever Layer (`retrieval/retriever.py`)**: Executes cosine similarity lookups across the dual narrative/structured collections and filters by relevance threshold.
+* **Generation Layer (`generation/`)**: Constructs strict grounding prompts and generates assistant responses via Google Gemini 1.5 Flash.
+
+---
+
+## ⚡ Intelligent Versioning & Deduplication
+
+FilingIQ implements an intelligent indexing pipeline that treats ChromaDB as the single source of truth:
+
+1. **Startup Synchronization**: On launch, the Streamlit session state processed file list is synchronized directly from active ChromaDB records, ensuring consistent state across restarts.
+2. **File Hashing**: When a file is uploaded, the Utility layer computes a SHA256 hash of its entire content.
+3. **Smart Ingest Decisions**:
+   * **Skip**: If the file hash matches a document hash already found in ChromaDB, the system skips loader chunking, embedding generation, and vector store writes.
+   * **Replace**: If the file is modified (hash mismatch), the vector store executes a **Safe Replacement Workflow** (pre-validates incoming metadata, pre-generates deterministic chunk IDs, deletes outdated vectors, and inserts new chunks).
+   * **Index**: New files are indexed directly.
+4. **Deterministic Chunk IDs**: Chunk IDs are computed as `SHA256(filename + file_type + index + chunk_text)` to prevent duplicate vector slots and ensure stability across document updates.
 
 ---
 
