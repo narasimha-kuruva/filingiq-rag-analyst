@@ -94,6 +94,7 @@ def run_tests():
         print(f"  Count before: {stats['count_before']} | Count after: {stats['count_after']}")
         
         assert stats['exists'] is True, "Should detect that the file already exists!"
+        assert stats['successful'] is True, "Replacement should report success!"
         assert stats['deleted'] == structured_count, f"Deleted count {stats['deleted']} does not match expected {structured_count}!"
         assert stats['count_before'] == stats['count_after'], f"Collection count changed on duplicate insert! {stats['count_before']} != {stats['count_after']}"
 

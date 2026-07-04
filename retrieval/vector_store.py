@@ -53,12 +53,28 @@ class DualVectorStore:
 
     # ── Deterministic IDs ──────────────────────────────────────────────
 
-    def _generate_content_id(self, filename: str, text: str) -> str:
-        """Generate a deterministic content-based SHA256 ID."""
+    def _generate_content_id(self, doc: Document) -> str:
+        """Generate a deterministic content-based SHA256 ID using stable metadata and text."""
         import hashlib
+        filename = doc.metadata.get("source_filename", "unknown")
+        file_type = doc.metadata.get("file_type", "unknown")
+        
+        # Extract any index available: chunk_index, row_index, or paragraph_index
+        idx = ""
+        if "chunk_index" in doc.metadata:
+            idx = str(doc.metadata["chunk_index"])
+        elif "row_index" in doc.metadata:
+            idx = str(doc.metadata["row_index"])
+        elif "paragraph_index" in doc.metadata:
+            idx = str(doc.metadata["paragraph_index"])
+            
+        text = doc.page_content
+        
+        # Build deterministic input string combining stable metadata and text
+        input_str = f"filename:{filename}|file_type:{file_type}|index:{idx}|text:{text}"
+        
         hasher = hashlib.sha256()
-        hasher.update(filename.encode("utf-8"))
-        hasher.update(text.encode("utf-8"))
+        hasher.update(input_str.encode("utf-8"))
         return hasher.hexdigest()
 
     # ── Add documents ──────────────────────────────────────────────────
@@ -82,18 +98,12 @@ class DualVectorStore:
 
         store = self._get_store(collection_target)
         
-        # Generate deterministic IDs based on content hash
-        ids = [
-            self._generate_content_id(
-                doc.metadata.get("source_filename", "unknown"),
-                doc.page_content
-            )
-            for doc in documents
-        ]
+        # Generate deterministic IDs based on content and metadata hash
+        ids = [self._generate_content_id(doc) for doc in documents]
         
         store.add_documents(documents, ids=ids)
         logger.info(
-            "Added %d documents to '%s' collection with deterministic content IDs.",
+            "Added %d documents to '%s' collection with deterministic content-based IDs.",
             len(documents),
             collection_target,
         )
@@ -102,7 +112,7 @@ class DualVectorStore:
 
     def replace_file(self, documents: list[Document], collection_target: str) -> dict:
         """
-        Perform an idempotent delete-before-insert replacement operation.
+        Perform an idempotent delete-before-insert replacement operation safely.
         
         Parameters
         ----------
@@ -114,18 +124,43 @@ class DualVectorStore:
         Returns
         -------
         dict
-            Indexing statistics: {"exists": bool, "deleted": int, "inserted": int, "count_before": int, "count_after": int}
+            Indexing statistics: {"exists": bool, "deleted": int, "inserted": int, "count_before": int, "count_after": int, "successful": bool}
         """
+        # 1. Validate the incoming documents
         if not documents:
+            logger.error("Validation failed: Empty documents list passed to replace_file.")
             return {
                 "exists": False,
                 "deleted": 0,
                 "inserted": 0,
                 "count_before": 0,
-                "count_after": 0
+                "count_after": 0,
+                "successful": False
             }
+            
+        for i, doc in enumerate(documents):
+            if not isinstance(doc, Document):
+                logger.error("Validation failed: Document at index %d is not a LangChain Document instance.", i)
+                return {
+                    "exists": False,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": 0,
+                    "count_after": 0,
+                    "successful": False
+                }
+            if not doc.metadata.get("source_filename"):
+                logger.error("Validation failed: Document at index %d has no source_filename metadata.", i)
+                return {
+                    "exists": False,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": 0,
+                    "count_after": 0,
+                    "successful": False
+                }
 
-        filename = documents[0].metadata.get("source_filename", "unknown")
+        filename = documents[0].metadata.get("source_filename")
         
         # Get target store
         store = self._get_store(collection_target)
@@ -133,6 +168,20 @@ class DualVectorStore:
         # Determine count before upload
         count_before = self.get_document_count(collection_target)
         
+        # 2. Generate deterministic IDs before deletion
+        try:
+            ids = [self._generate_content_id(doc) for doc in documents]
+        except Exception as e:
+            logger.error("Failed to generate deterministic IDs for file '%s': %s", filename, e, exc_info=True)
+            return {
+                "exists": False,
+                "deleted": 0,
+                "inserted": 0,
+                "count_before": count_before,
+                "count_after": count_before,
+                "successful": False
+            }
+
         # Check if files already exist
         try:
             result = store._collection.get(
@@ -148,7 +197,9 @@ class DualVectorStore:
             deleted_count = 0
             ids_to_delete = []
 
-        # Delete existing documents
+        successful = True
+        
+        # 3. Delete only after validation succeeds
         if deleted_count > 0:
             try:
                 store.delete(ids=ids_to_delete)
@@ -159,16 +210,61 @@ class DualVectorStore:
                     collection_target
                 )
             except Exception as e:
-                logger.error("Failed to delete existing files in replace_file: %s", e, exc_info=True)
-                deleted_count = 0
+                logger.error("Failed to delete existing files for '%s' in replace_file: %s", filename, e, exc_info=True)
+                # If deletion failed, we abort the replacement to avoid duplicate/inconsistent state
+                count_after = self.get_document_count(collection_target)
+                self._log_upload_metrics(filename, exists, collection_target, count_before, deleted_count=0, inserted_count=0, count_after=count_after, successful=False)
+                return {
+                    "exists": exists,
+                    "deleted": 0,
+                    "inserted": 0,
+                    "count_before": count_before,
+                    "count_after": count_after,
+                    "successful": False
+                }
 
-        # Insert new documents with deterministic SHA256 IDs
-        self.add_documents(documents, collection_target)
-        
+        # 4. Insert the new documents
+        try:
+            store.add_documents(documents, ids=ids)
+        except Exception as e:
+            logger.error("Failed to insert documents for file '%s' in replace_file: %s", filename, e, exc_info=True)
+            successful = False
+
         # Get count after upload
         count_after = self.get_document_count(collection_target)
 
-        # Log the exact UPLOAD metrics block requested by the user
+        # Log metrics
+        self._log_upload_metrics(
+            filename,
+            exists,
+            collection_target,
+            count_before,
+            deleted_count if successful else 0,
+            len(documents) if successful else 0,
+            count_after,
+            successful
+        )
+
+        return {
+            "exists": exists,
+            "deleted": deleted_count if successful else 0,
+            "inserted": len(documents) if successful else 0,
+            "count_before": count_before,
+            "count_after": count_after,
+            "successful": successful
+        }
+
+    def _log_upload_metrics(
+        self,
+        filename: str,
+        exists: bool,
+        collection_target: str,
+        count_before: int,
+        deleted_count: int,
+        inserted_count: int,
+        count_after: int,
+        successful: bool
+    ) -> None:
         log_msg = (
             "\n--------------------------------------------------\n"
             "UPLOAD\n"
@@ -178,18 +274,11 @@ class DualVectorStore:
             f"Collection:\n{collection_target}\n\n"
             f"Documents Before:\n{count_before}\n\n"
             f"Deleted:\n{deleted_count}\n\n"
-            f"Inserted:\n{len(documents)}\n\n"
-            f"Documents After:\n{count_after}"
+            f"Inserted:\n{inserted_count}\n\n"
+            f"Documents After:\n{count_after}\n\n"
+            f"Replacement Successful:\n{successful}"
         )
         logger.info(log_msg)
-
-        return {
-            "exists": exists,
-            "deleted": deleted_count,
-            "inserted": len(documents),
-            "count_before": count_before,
-            "count_after": count_after
-        }
 
     # ── Delete file (legacy/utility) ───────────────────────────────────
 
