@@ -13,6 +13,7 @@ import streamlit as st
 
 from config import FILE_TYPE_ICONS, REFUSAL_MESSAGE
 from ingestion.router import ingest_file
+from utils.file_hash import compute_file_hash
 from retrieval.embedder import get_embedding_function
 from retrieval.vector_store import DualVectorStore
 from retrieval.retriever import retrieve
@@ -201,20 +202,20 @@ with st.sidebar:
                         file_bytes = uploaded_file.read()
                         buffer = io.BytesIO(file_bytes)
 
-                        # Ingest
+                        # Compute file hash in the Ingestion layer
+                        file_hash = compute_file_hash(buffer)
+
+                        # Parse and chunk using the Ingestion layer
                         documents, collection_target = ingest_file(
                             buffer, uploaded_file.name
                         )
 
-                        if not documents:
-                            st.warning(
-                                f"⚠️ No content extracted from {uploaded_file.name}"
-                            )
-                            continue
-
-                        # Perform the replacement operation (idempotent delete-before-insert)
-                        st.session_state.vector_store.replace_file(
-                            documents, collection_target
+                        # Perform the intelligent indexing operation
+                        st.session_state.vector_store.sync_document(
+                            documents=documents,
+                            file_hash=file_hash,
+                            source_filename=uploaded_file.name,
+                            collection_target=collection_target
                         )
 
                         # Track processed upload in current session

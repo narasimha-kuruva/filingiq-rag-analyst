@@ -110,7 +110,7 @@ class DualVectorStore:
 
     # ── Replace file (idempotent delete-before-insert) ─────────────────
 
-    def replace_file(self, documents: list[Document], collection_target: str) -> dict:
+    def replace_file(self, documents: list[Document], collection_target: str, log_metrics: bool = True) -> dict:
         """
         Perform an idempotent delete-before-insert replacement operation safely.
         
@@ -120,6 +120,8 @@ class DualVectorStore:
             Documents to index.
         collection_target : str
             "narrative" or "structured".
+        log_metrics : bool, optional
+            Whether to log the metrics default block.
 
         Returns
         -------
@@ -275,17 +277,18 @@ class DualVectorStore:
                 logger.error("Failed to delete existing files for '%s' in replace_file: %s", filename, e, exc_info=True)
                 # If deletion failed, we abort the replacement to avoid duplicate/inconsistent state
                 count_after = self.get_document_count(collection_target)
-                self._log_upload_metrics(
-                    filename=filename,
-                    exists=exists,
-                    collection_target=collection_target,
-                    count_before=count_before,
-                    deleted_count=0,
-                    inserted_count=0,
-                    count_after=count_after,
-                    duplicate_id_count=duplicate_id_count,
-                    successful=False
-                )
+                if log_metrics:
+                    self._log_upload_metrics(
+                        filename=filename,
+                        exists=exists,
+                        collection_target=collection_target,
+                        count_before=count_before,
+                        deleted_count=0,
+                        inserted_count=0,
+                        count_after=count_after,
+                        duplicate_id_count=duplicate_id_count,
+                        successful=False
+                    )
                 return {
                     "exists": exists,
                     "deleted": 0,
@@ -306,17 +309,18 @@ class DualVectorStore:
         count_after = self.get_document_count(collection_target)
 
         # Log metrics
-        self._log_upload_metrics(
-            filename=filename,
-            exists=exists,
-            collection_target=collection_target,
-            count_before=count_before,
-            deleted_count=deleted_count if successful else 0,
-            inserted_count=len(documents) if successful else 0,
-            count_after=count_after,
-            duplicate_id_count=duplicate_id_count,
-            successful=successful
-        )
+        if log_metrics:
+            self._log_upload_metrics(
+                filename=filename,
+                exists=exists,
+                collection_target=collection_target,
+                count_before=count_before,
+                deleted_count=deleted_count if successful else 0,
+                inserted_count=len(documents) if successful else 0,
+                count_after=count_after,
+                duplicate_id_count=duplicate_id_count,
+                successful=successful
+            )
 
         return {
             "exists": exists,
@@ -325,6 +329,148 @@ class DualVectorStore:
             "count_before": count_before,
             "count_after": count_after,
             "successful": successful
+        }
+
+    # ── Intelligent File Version Detection ────────────────────────────
+
+    def sync_document(
+        self,
+        documents: list[Document],
+        file_hash: str,
+        source_filename: str,
+        collection_target: str
+    ) -> dict:
+        """
+        High-level storage API to index a file intelligently: Skip, Insert, or Replace.
+
+        Parameters
+        ----------
+        documents : list[Document]
+            Pre-prepared document chunks.
+        file_hash : str
+            SHA256 hash of the entire file.
+        source_filename : str
+            Filename of the source document.
+        collection_target : str
+            "narrative" or "structured".
+
+        Returns
+        -------
+        dict
+            Indexing statistics.
+        """
+        import datetime
+        
+        store = self._get_store(collection_target)
+        count_before = self.get_document_count(collection_target)
+
+        # Check if file already exists in ChromaDB
+        stored_hash = None
+        exists = False
+        try:
+            result = store._collection.get(
+                where={"source_filename": source_filename},
+                limit=1,
+                include=["metadatas"]
+            )
+            if result and result.get("metadatas"):
+                stored_hash = result["metadatas"][0].get("file_hash")
+                exists = True
+        except Exception as e:
+            logger.warning("Failed to query existing file hash in index_file: %s", e)
+
+        # Compare file hash
+        if exists and stored_hash == file_hash:
+            # Skip indexing completely
+            log_msg = (
+                "\n--------------------------------------------------\n"
+                "UPLOAD\n"
+                "--------------------------------------------------\n\n"
+                f"File:\n{source_filename}\n\n"
+                f"File Hash:\n{file_hash}\n\n"
+                f"Already Exists:\n{exists}\n\n"
+                f"Stored Hash:\n{stored_hash}\n\n"
+                f"Uploaded Hash:\n{file_hash}\n\n"
+                f"File Changed:\nFalse\n\n"
+                f"Action:\nSkipped\n\n"
+                f"Documents Before:\n{count_before}\n\n"
+                f"Documents After:\n{count_before}\n\n"
+                f"Embeddings Generated:\n0\n\n"
+                f"Vectors Deleted:\n0\n\n"
+                f"Vectors Inserted:\n0"
+            )
+            logger.info(log_msg)
+            return {
+                "action": "Skipped",
+                "already_indexed": True,
+                "file_changed": False,
+                "count_before": count_before,
+                "count_after": count_before,
+                "embeddings_generated": 0,
+                "deleted_count": 0,
+                "inserted_count": 0,
+                "successful": True
+            }
+
+        # File has changed or does not exist: call Safe Replacement Workflow
+        action = "Replaced" if exists else "Indexed"
+        
+        if not documents:
+            logger.warning("No documents to index for file '%s'.", source_filename)
+            return {
+                "action": action,
+                "already_indexed": exists,
+                "file_changed": True,
+                "count_before": count_before,
+                "count_after": count_before,
+                "embeddings_generated": 0,
+                "deleted_count": 0,
+                "inserted_count": 0,
+                "successful": False
+            }
+
+        # Add file-level metadata to all chunks
+        indexed_at = datetime.datetime.utcnow().isoformat()
+        for doc in documents:
+            doc.metadata["file_hash"] = file_hash
+            doc.metadata["indexed_at"] = indexed_at
+            doc.metadata["chunk_count"] = len(documents)
+
+        # Call replace_file to perform validation, deterministic ID gen, deletion, and insertion
+        stats = self.replace_file(documents, collection_target, log_metrics=False)
+        
+        # Override action and log custom format for replacement/insertion
+        if stats["successful"]:
+            log_msg = (
+                "\n--------------------------------------------------\n"
+                "UPLOAD\n"
+                "--------------------------------------------------\n\n"
+                f"File:\n{source_filename}\n\n"
+                f"File Hash:\n{file_hash}\n\n"
+                f"Already Exists:\n{exists}\n\n"
+                f"Stored Hash:\n{stored_hash}\n\n"
+                f"Uploaded Hash:\n{file_hash}\n\n"
+                f"File Changed:\nTrue\n\n"
+                f"Action:\n{action}\n\n"
+                f"Documents Before:\n{stats['count_before']}\n\n"
+                f"Documents After:\n{stats['count_after']}\n\n"
+                f"Embeddings Generated:\n{stats['inserted']}\n\n"
+                f"Vectors Deleted:\n{stats['deleted']}\n\n"
+                f"Vectors Inserted:\n{stats['inserted']}\n\n"
+                f"Replacement Successful:\n{stats['successful']}"
+            )
+            logger.info(log_msg)
+
+        return {
+            "action": action,
+            "already_indexed": exists,
+            "file_changed": True,
+            "count_before": stats["count_before"],
+            "count_after": stats["count_after"],
+            "embeddings_generated": stats["inserted"] if stats["successful"] else 0,
+            "deleted_count": stats["deleted"] if stats["successful"] else 0,
+            "inserted_count": stats["inserted"] if stats["successful"] else 0,
+            "successful": stats["successful"]
         }
 
     def _log_upload_metrics(

@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 
 from config import SIMILARITY_THRESHOLD
 from ingestion.router import ingest_file
+from utils.file_hash import compute_file_hash
 from retrieval.embedder import get_embedding_function
 from retrieval.vector_store import DualVectorStore
 from retrieval.retriever import retrieve
@@ -44,8 +45,14 @@ def setup_test_db(vector_store: DualVectorStore):
             return False
 
         print(f"  Loading {filename} -> {target}...")
+        file_hash = compute_file_hash(filepath)
         docs, collection_target = ingest_file(filepath, filename)
-        vector_store.add_documents(docs, collection_target)
+        vector_store.sync_document(
+            documents=docs,
+            file_hash=file_hash,
+            source_filename=filename,
+            collection_target=collection_target
+        )
 
     return True
 
@@ -83,20 +90,65 @@ def run_tests():
 
         # ── Test Idempotency (Delete-before-insert & deterministic IDs) ──
         print("\nTesting Idempotency (uploading the same files again)...")
-        # Ingest and index again
-        docs, collection_target = ingest_file(os.path.join(DATA_DIR, "tech_company_ratios.csv"), "tech_company_ratios.csv")
+        filepath = os.path.join(DATA_DIR, "tech_company_ratios.csv")
         
-        # Call encapsulated replace_file logic
-        stats = vector_store.replace_file(docs, collection_target)
-        print(f"  Already Exists: {stats['exists']}")
-        print(f"  Deleted count: {stats['deleted']} (expected: {structured_count})")
-        print(f"  Inserted count: {stats['inserted']} (expected: {len(docs)})")
-        print(f"  Count before: {stats['count_before']} | Count after: {stats['count_after']}")
+        file_hash = compute_file_hash(filepath)
+        docs, collection_target = ingest_file(filepath, "tech_company_ratios.csv")
         
-        assert stats['exists'] is True, "Should detect that the file already exists!"
-        assert stats['successful'] is True, "Replacement should report success!"
-        assert stats['deleted'] == structured_count, f"Deleted count {stats['deleted']} does not match expected {structured_count}!"
+        # Call high-level index_file logic for the exact same file
+        stats = vector_store.sync_document(
+            documents=docs,
+            file_hash=file_hash,
+            source_filename="tech_company_ratios.csv",
+            collection_target=collection_target
+        )
+        print(f"  Action: {stats['action']}")
+        print(f"  Already Exists: {stats['already_indexed']}")
+        print(f"  File Changed: {stats['file_changed']}")
+        print(f"  Deleted count: {stats['deleted_count']} (expected: 0)")
+        print(f"  Inserted count: {stats['inserted_count']} (expected: 0)")
+        
+        assert stats['action'] == "Skipped", "Action should be Skipped for unchanged file!"
+        assert stats['already_indexed'] is True, "Should detect that the file already exists!"
+        assert stats['file_changed'] is False, "Should report that the file has not changed!"
+        assert stats['deleted_count'] == 0, "No vectors should be deleted!"
+        assert stats['inserted_count'] == 0, "No vectors should be inserted!"
         assert stats['count_before'] == stats['count_after'], f"Collection count changed on duplicate insert! {stats['count_before']} != {stats['count_after']}"
+
+        # ── Test Versioning/Replacement (Modifying file) ──────────────────
+        print("\nTesting Versioning (uploading a modified version of the file)...")
+        modified_filepath = os.path.join(DATA_DIR, "tech_company_ratios_mod.csv")
+        with open(filepath, "r") as f:
+            lines = f.readlines()
+        lines[-1] = lines[-1].replace("112.8", "120.0") # Change PE Ratio of Tesla in 2021
+        with open(modified_filepath, "w") as f:
+            f.writelines(lines)
+            
+        try:
+            file_hash_mod = compute_file_hash(modified_filepath)
+            docs_mod, collection_target_mod = ingest_file(modified_filepath, "tech_company_ratios.csv")
+            
+            stats_mod = vector_store.sync_document(
+                documents=docs_mod,
+                file_hash=file_hash_mod,
+                source_filename="tech_company_ratios.csv",
+                collection_target=collection_target_mod
+            )
+            print(f"  Action: {stats_mod['action']}")
+            print(f"  Already Exists: {stats_mod['already_indexed']}")
+            print(f"  File Changed: {stats_mod['file_changed']}")
+            print(f"  Deleted count: {stats_mod['deleted_count']} (expected: {structured_count})")
+            print(f"  Inserted count: {stats_mod['inserted_count']} (expected: {structured_count})")
+            
+            assert stats_mod['action'] == "Replaced", "Action should be Replaced for modified file!"
+            assert stats_mod['already_indexed'] is True, "Should detect that the file already exists!"
+            assert stats_mod['file_changed'] is True, "Should report that the file has changed!"
+            assert stats_mod['deleted_count'] == structured_count, "Old vectors should be deleted!"
+            assert stats_mod['inserted_count'] == structured_count, "New vectors should be inserted!"
+            assert stats_mod['successful'] is True, "Replacement should report success!"
+        finally:
+            if os.path.exists(modified_filepath):
+                os.remove(modified_filepath)
 
         # ── Test 1: Query that matches Narrative ───────────────────────
         query_1 = "What was Services revenue in Q4 2024?"
