@@ -92,10 +92,20 @@ python generate_sample_data.py
 streamlit run app.py
 ```
 
-### Verify the ingestion layer (optional)
+### Run Tests (optional)
+Generate the sample data files first:
 ```bash
-python generate_sample_data.py   # Create test files first
-python test_ingestion.py          # Run ingestion tests
+python generate_sample_data.py
+```
+
+To verify the ingestion layer, run the ingestion tests:
+```bash
+python test_ingestion.py
+```
+
+To verify the database and retrieval logic, run the retrieval tests:
+```bash
+python test_retrieval.py
 ```
 
 ---
@@ -123,21 +133,24 @@ All tunable parameters are centralized in [`config.py`](config.py):
 | `CHUNK_SIZE` | 1000 | Character count per text chunk |
 | `CHUNK_OVERLAP` | 150 | Overlap between adjacent chunks |
 | `TOP_K` | 4 | Number of results per collection |
-| `SIMILARITY_THRESHOLD` | 0.55 | Minimum cosine similarity to keep results |
-| `LLM_MODEL` | `gemini-1.5-flash` | Google Gemini model |
+| `SIMILARITY_THRESHOLD` | `0.50` | Minimum cosine similarity to keep results |
+| `LLM_MODEL` | `gemini-2.5-flash` | Google Gemini model |
 | `TEMPERATURE` | 0.15 | LLM temperature (low = less creative drift) |
 | `EMBEDDING_MODEL` | `models/embedding-001` | Primary embedding model |
+| `LOCAL_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local fallback embedding model |
+| `CHROMA_PERSIST_DIR` | `chroma_db` | Persistent vector store directory (or `/tmp/chroma_db` on Streamlit Cloud) |
 | `AGENTIC_MODE` | `False` | Future: enable tool-calling agent |
 
 ---
 
 ## 🔐 How Grounding Works
 
-FilingIQ uses a **strict grounding prompt** that enforces:
+FilingIQ uses a **strict grounding prompt** and routing logic that enforces:
 1. **Document-only answers** — the LLM cannot use its training data
 2. **Mandatory citations** — every answer must end with a `Sources:` line
 3. **Deterministic refusal** — if nothing relevant is found, the system returns a fixed message *without even calling the LLM*, saving API quota
 4. **Safe arithmetic** — calculations are allowed only with numbers present in the retrieved context
+5. **Greeting short-circuiting** — simple greeting or capability queries (e.g., 'hello', 'who are you') bypass database retrieval and route to a direct greeting generator, reducing query overhead
 
 ---
 

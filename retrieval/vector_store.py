@@ -13,7 +13,7 @@ import logging
 
 import chromadb
 from langchain_chroma import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from config import (
@@ -36,11 +36,13 @@ class DualVectorStore:
             client=self._client,
             collection_name=NARRATIVE_COLLECTION,
             embedding_function=self._embedding_fn,
+            collection_metadata={"hnsw:space": "cosine"},
         )
         self.structured = Chroma(
             client=self._client,
             collection_name=STRUCTURED_COLLECTION,
             embedding_function=self._embedding_fn,
+            collection_metadata={"hnsw:space": "cosine"},
         )
         logger.info(
             "ChromaDB initialized at %s (collections: %s, %s)",
@@ -84,11 +86,31 @@ class DualVectorStore:
         """
         Run similarity search on a specific collection.
 
-        Returns list of (Document, distance_score) tuples.
-        Lower distance = more similar for ChromaDB's default L2 metric.
+        Returns list of (Document, cosine_similarity) tuples.
+        Higher score = more similar. Clamped between 0.0 and 1.0.
         """
         store = self._get_store(collection_target)
-        return store.similarity_search_with_relevance_scores(query, k=k)
+        results = store.similarity_search_with_score(query, k=k)
+        
+        mapped_results = []
+        for idx, (doc, distance) in enumerate(results, start=1):
+            # Cosine similarity = 1.0 - cosine_distance
+            similarity = max(0.0, min(1.0, 1.0 - distance))
+            mapped_results.append((doc, similarity))
+
+            # Log raw retrieval details
+            logger.info(
+                f"--------------------------------------------------\n"
+                f"Result #{idx}\n"
+                f"--------------------------------------------------\n"
+                f"Raw Distance:\n{distance}\n\n"
+                f"Similarity:\n{similarity}\n\n"
+                f"Metadata:\n{doc.metadata}\n\n"
+                f"Chunk Length:\n{len(doc.page_content)}\n\n"
+                f"Chunk:\n{doc.page_content}"
+            )
+            
+        return mapped_results
 
     # ── Collection stats ───────────────────────────────────────────────
 
@@ -133,11 +155,13 @@ class DualVectorStore:
             client=self._client,
             collection_name=NARRATIVE_COLLECTION,
             embedding_function=self._embedding_fn,
+            collection_metadata={"hnsw:space": "cosine"},
         )
         self.structured = Chroma(
             client=self._client,
             collection_name=STRUCTURED_COLLECTION,
             embedding_function=self._embedding_fn,
+            collection_metadata={"hnsw:space": "cosine"},
         )
         logger.info("Both collections cleared and re-created.")
 

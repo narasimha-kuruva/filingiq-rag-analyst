@@ -334,7 +334,7 @@ for msg in st.session_state.messages:
 # ── Chat input ─────────────────────────────────────────────────────────────
 if prompt := st.chat_input(
     "Ask a question about your uploaded documents...",
-    disabled=not st.session_state.processed_files,
+    disabled=False,
 ):
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -343,41 +343,50 @@ if prompt := st.chat_input(
 
     # Generate response
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching documents & generating answer..."):
-            # Retrieve
-            retrieval_result = retrieve(
-                prompt, st.session_state.vector_store
-            )
+        from retrieval.retriever import is_greeting_query
+        
+        if not st.session_state.processed_files and not is_greeting_query(prompt):
+            answer = "👋 Please upload some financial documents in the sidebar first so I can analyze them and answer your questions."
+            sources = []
+            st.markdown(answer)
+        else:
+            with st.spinner("🔍 Searching documents & generating answer..."):
+                # Retrieve
+                retrieval_result = retrieve(
+                    prompt, st.session_state.vector_store
+                )
 
-            # Generate
-            gen_result = generate(prompt, retrieval_result)
+                # Generate
+                gen_result = generate(prompt, retrieval_result)
+                answer = gen_result.answer
+                sources = gen_result.sources
 
-        # Display answer
-        st.markdown(gen_result.answer)
+            # Display answer
+            st.markdown(answer)
 
-        # Display sources
-        if gen_result.sources:
-            with st.expander("🔍 View Sources", expanded=False):
-                for i, src in enumerate(gen_result.sources, 1):
-                    citation = format_citation(src)
-                    score = src.get("similarity_score", 0)
-                    origin = src.get("origin", "?")
+            # Display sources
+            if sources:
+                with st.expander("🔍 View Sources", expanded=False):
+                    for i, src in enumerate(sources, 1):
+                        citation = format_citation(src)
+                        score = src.get("similarity_score", 0)
+                        origin = src.get("origin", "?")
 
-                    st.markdown(
-                        f"**Source {i}** — `[{origin}]` {citation} *(score: {score:.4f})*"
-                    )
-                    st.markdown(
-                        f'<small style="color:#6b7280;">{src.get("content_preview", "")}</small>',
-                        unsafe_allow_html=True,
-                    )
-                    if i < len(gen_result.sources):
-                        st.markdown("---")
+                        st.markdown(
+                            f"**Source {i}** — `[{origin}]` {citation} *(score: {score:.4f})*"
+                        )
+                        st.markdown(
+                            f'<small style="color:#6b7280;">{src.get("content_preview", "")}</small>',
+                            unsafe_allow_html=True,
+                        )
+                        if i < len(sources):
+                            st.markdown("---")
 
     # Save to history
     st.session_state.messages.append(
         {
             "role": "assistant",
-            "content": gen_result.answer,
-            "sources": gen_result.sources,
+            "content": answer,
+            "sources": sources,
         }
     )

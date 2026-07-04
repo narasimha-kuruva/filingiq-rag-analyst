@@ -13,10 +13,10 @@ CHUNK_OVERLAP = 150
 
 # ─── Retrieval ──────────────────────────────────────────────────────────────
 TOP_K = 4
-SIMILARITY_THRESHOLD = 0.55  # cosine; discard collection results below this
+SIMILARITY_THRESHOLD = 0.50  # cosine; discard collection results below this
 
 # ─── LLM ────────────────────────────────────────────────────────────────────
-LLM_MODEL = "gemini-1.5-flash"
+LLM_MODEL = "gemini-2.5-flash"
 TEMPERATURE = 0.15
 
 # ─── Embeddings ─────────────────────────────────────────────────────────────

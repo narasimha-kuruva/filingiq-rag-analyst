@@ -9,7 +9,7 @@ import io
 from typing import Union
 
 import pandas as pd
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 
 def _row_to_sentence(row: pd.Series, row_index: int, filename: str) -> str:

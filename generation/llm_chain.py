@@ -14,7 +14,7 @@ LLM Chain — builds the retrieval → prompt → Gemini generation pipeline.
 #    based on the user's question.
 # 4. The core retriever.retrieve() and this module's generate() function
 #    remain unchanged — they are already composable standalone functions.
-# ═══════════════════════════════════════════════════════════════════════════
+"""
 
 import os
 import logging
@@ -75,6 +75,68 @@ def generate(
     GenerationResult
         Contains the answer text, source metadata, and relevance flag.
     """
+    # ── If it is a greeting, handle with a greeting prompt ──────────────
+    if getattr(retrieval_result, "is_greeting", False):
+        api_key = _get_api_key()
+        if not api_key:
+            return GenerationResult(
+                answer="👋 Hello! I am FilingIQ, your document-grounded financial analyst assistant. "
+                       "Please configure your Gemini API key in the secrets or environment to start asking questions about uploaded documents.",
+                sources=[],
+                is_relevant=True,
+            )
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langchain_core.prompts import PromptTemplate
+
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL,
+                google_api_key=api_key,
+                temperature=TEMPERATURE,
+                convert_system_message_to_human=True,
+            )
+
+            greeting_template = """You are FilingIQ, a document-grounded financial analyst assistant.
+The user is greeting you or asking about your capabilities.
+Respond with a polite, professional, and friendly response. Introduce yourself, state your features (analyzing 10-K PDFs, DOCX memos, XLSX financials, CSV ratios, and TXT notes), and invite the user to upload files in the sidebar and ask questions. Keep it concise (1-2 short paragraphs).
+
+USER QUERY: {question}
+RESPONSE:"""
+            prompt = PromptTemplate(input_variables=["question"], template=greeting_template)
+            prompt_text = prompt.format(question=question)
+
+            # Log before Gemini API call (greeting)
+            logger.info(
+                f"=== GEMINI CALL DETAILS (GREETING) ===\n"
+                f"User Question: {question}\n"
+                f"Context Length: 0 (Greeting)\n"
+                f"Prompt Length: {len(prompt_text)}\n"
+                f"Number of retrieved chunks: 0"
+            )
+
+            response = llm.invoke(prompt_text)
+            answer = response.content
+
+            # Log after Gemini returns (greeting)
+            logger.info(
+                f"=== GEMINI CALL RESPONSE (GREETING) ===\n"
+                f"Generation completed successfully.\n"
+                f"Answer Length: {len(answer)}\n"
+                f"COMPLETE generated answer:\n{answer}"
+            )
+
+            return GenerationResult(
+                answer=answer,
+                sources=[],
+                is_relevant=True,
+            )
+        except Exception as e:
+            return GenerationResult(
+                answer="👋 Hello! I am FilingIQ, your AI financial analyst. How can I help you analyze your financial documents today?",
+                sources=[],
+                is_relevant=True,
+            )
+
     # ── Short-circuit: nothing relevant found ──────────────────────────
     if not retrieval_result.is_relevant:
         return GenerationResult(
@@ -118,9 +180,26 @@ def generate(
             question=question,
         )
 
+        # Log before Gemini API call
+        logger.info(
+            f"=== GEMINI CALL DETAILS ===\n"
+            f"User Question: {question}\n"
+            f"Context Length: {len(retrieval_result.context)}\n"
+            f"Prompt Length: {len(prompt_text)}\n"
+            f"Number of retrieved chunks: {len(retrieval_result.sources)}"
+        )
+
         # Invoke LLM
         response = llm.invoke(prompt_text)
         answer = response.content
+
+        # Log after Gemini returns
+        logger.info(
+            f"=== GEMINI CALL RESPONSE ===\n"
+            f"Generation completed successfully.\n"
+            f"Answer Length: {len(answer)}\n"
+            f"COMPLETE generated answer:\n{answer}"
+        )
 
         return GenerationResult(
             answer=answer,

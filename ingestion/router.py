@@ -10,7 +10,7 @@ import io
 import os
 from typing import Union
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from config import SUPPORTED_EXTENSIONS
 from ingestion.pdf_loader import load_pdf

@@ -15,6 +15,11 @@ env/
 
 # ChromaDB persistence
 chroma_db/
+test_chroma_db*/
+
+# Generated sample data files
+data/*
+!data/.gitkeep
 
 # Streamlit secrets (never commit real keys)
 .streamlit/secrets.toml

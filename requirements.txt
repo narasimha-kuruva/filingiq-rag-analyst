@@ -25,6 +25,7 @@ pandas>=2.2.0
 
 # ── Embeddings (local fallback) ──────────────────────────────────────────────
 sentence-transformers>=3.0.0
+torchvision>=0.16.0
 
 # ── PDF generation (sample data only, not needed in production) ──────────────
 reportlab>=4.0.0

@@ -5,7 +5,7 @@ The prompt enforces document-only answering, mandatory citations,
 and a fixed refusal message when context is insufficient.
 """
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 SYSTEM_PROMPT_TEMPLATE = """You are FilingIQ, a document-grounded financial analyst assistant.
 
