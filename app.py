@@ -212,31 +212,9 @@ with st.sidebar:
                             )
                             continue
 
-                        # Retrieve document count before upload
-                        count_before = st.session_state.vector_store.get_document_count(collection_target)
-
-                        # Implement Delete-Before-Insert (Idempotent Uploads)
-                        deleted_count = st.session_state.vector_store.delete_file(
-                            uploaded_file.name, collection_target
-                        )
-
-                        # Index into vector store
-                        st.session_state.vector_store.add_documents(
+                        # Perform the replacement operation (idempotent delete-before-insert)
+                        st.session_state.vector_store.replace_file(
                             documents, collection_target
-                        )
-
-                        # Retrieve document count after upload
-                        count_after = st.session_state.vector_store.get_document_count(collection_target)
-
-                        # Log verification metrics
-                        logger.info(
-                            f"\n--- Indexing Metrics for {uploaded_file.name} ---\n"
-                            f"Collection target: {collection_target}\n"
-                            f"Document count before upload: {count_before}\n"
-                            f"Number of deleted vectors: {deleted_count}\n"
-                            f"Number of inserted vectors: {len(documents)}\n"
-                            f"Document count after upload: {count_after}\n"
-                            f"----------------------------------------"
                         )
 
                         # Track processed upload in current session

@@ -51,13 +51,23 @@ class DualVectorStore:
             STRUCTURED_COLLECTION,
         )
 
+    # ── Deterministic IDs ──────────────────────────────────────────────
+
+    def _generate_content_id(self, filename: str, text: str) -> str:
+        """Generate a deterministic content-based SHA256 ID."""
+        import hashlib
+        hasher = hashlib.sha256()
+        hasher.update(filename.encode("utf-8"))
+        hasher.update(text.encode("utf-8"))
+        return hasher.hexdigest()
+
     # ── Add documents ──────────────────────────────────────────────────
     
     def add_documents(
         self, documents: list[Document], collection_target: str
     ) -> None:
         """
-        Add documents to the appropriate collection using deterministic IDs.
+        Add documents to the appropriate collection using deterministic content-based IDs.
 
         Parameters
         ----------
@@ -72,20 +82,116 @@ class DualVectorStore:
 
         store = self._get_store(collection_target)
         
-        # Generate deterministic IDs of the format: filename_index
+        # Generate deterministic IDs based on content hash
         ids = [
-            f"{doc.metadata.get('source_filename', 'unknown')}_{idx}"
-            for idx, doc in enumerate(documents)
+            self._generate_content_id(
+                doc.metadata.get("source_filename", "unknown"),
+                doc.page_content
+            )
+            for doc in documents
         ]
         
         store.add_documents(documents, ids=ids)
         logger.info(
-            "Added %d documents to '%s' collection with deterministic IDs.",
+            "Added %d documents to '%s' collection with deterministic content IDs.",
             len(documents),
             collection_target,
         )
 
-    # ── Delete file ────────────────────────────────────────────────────
+    # ── Replace file (idempotent delete-before-insert) ─────────────────
+
+    def replace_file(self, documents: list[Document], collection_target: str) -> dict:
+        """
+        Perform an idempotent delete-before-insert replacement operation.
+        
+        Parameters
+        ----------
+        documents : list[Document]
+            Documents to index.
+        collection_target : str
+            "narrative" or "structured".
+
+        Returns
+        -------
+        dict
+            Indexing statistics: {"exists": bool, "deleted": int, "inserted": int, "count_before": int, "count_after": int}
+        """
+        if not documents:
+            return {
+                "exists": False,
+                "deleted": 0,
+                "inserted": 0,
+                "count_before": 0,
+                "count_after": 0
+            }
+
+        filename = documents[0].metadata.get("source_filename", "unknown")
+        
+        # Get target store
+        store = self._get_store(collection_target)
+        
+        # Determine count before upload
+        count_before = self.get_document_count(collection_target)
+        
+        # Check if files already exist
+        try:
+            result = store._collection.get(
+                where={"source_filename": filename},
+                include=[]
+            )
+            ids_to_delete = result.get("ids", [])
+            exists = len(ids_to_delete) > 0
+            deleted_count = len(ids_to_delete)
+        except Exception as e:
+            logger.warning("Failed to query existing files in replace_file: %s", e)
+            exists = False
+            deleted_count = 0
+            ids_to_delete = []
+
+        # Delete existing documents
+        if deleted_count > 0:
+            try:
+                store.delete(ids=ids_to_delete)
+                logger.info(
+                    "Deleted %d existing documents for file '%s' from '%s' collection.",
+                    deleted_count,
+                    filename,
+                    collection_target
+                )
+            except Exception as e:
+                logger.error("Failed to delete existing files in replace_file: %s", e, exc_info=True)
+                deleted_count = 0
+
+        # Insert new documents with deterministic SHA256 IDs
+        self.add_documents(documents, collection_target)
+        
+        # Get count after upload
+        count_after = self.get_document_count(collection_target)
+
+        # Log the exact UPLOAD metrics block requested by the user
+        log_msg = (
+            "\n--------------------------------------------------\n"
+            "UPLOAD\n"
+            "--------------------------------------------------\n\n"
+            f"File:\n{filename}\n\n"
+            f"Already Exists:\n{exists}\n\n"
+            f"Collection:\n{collection_target}\n\n"
+            f"Documents Before:\n{count_before}\n\n"
+            f"Deleted:\n{deleted_count}\n\n"
+            f"Inserted:\n{len(documents)}\n\n"
+            f"Documents After:\n{count_after}"
+        )
+        logger.info(log_msg)
+
+        return {
+            "exists": exists,
+            "deleted": deleted_count,
+            "inserted": len(documents),
+            "count_before": count_before,
+            "count_after": count_after
+        }
+
+    # ── Delete file (legacy/utility) ───────────────────────────────────
 
     def delete_file(self, filename: str, collection_target: str) -> int:
         """
