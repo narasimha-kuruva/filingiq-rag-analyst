@@ -52,12 +52,12 @@ class DualVectorStore:
         )
 
     # ── Add documents ──────────────────────────────────────────────────
-
+    
     def add_documents(
         self, documents: list[Document], collection_target: str
     ) -> None:
         """
-        Add documents to the appropriate collection.
+        Add documents to the appropriate collection using deterministic IDs.
 
         Parameters
         ----------
@@ -71,12 +71,54 @@ class DualVectorStore:
             return
 
         store = self._get_store(collection_target)
-        store.add_documents(documents)
+        
+        # Generate deterministic IDs of the format: filename_index
+        ids = [
+            f"{doc.metadata.get('source_filename', 'unknown')}_{idx}"
+            for idx, doc in enumerate(documents)
+        ]
+        
+        store.add_documents(documents, ids=ids)
         logger.info(
-            "Added %d documents to '%s' collection.",
+            "Added %d documents to '%s' collection with deterministic IDs.",
             len(documents),
             collection_target,
         )
+
+    # ── Delete file ────────────────────────────────────────────────────
+
+    def delete_file(self, filename: str, collection_target: str) -> int:
+        """
+        Delete all documents belonging to a filename in a specific collection.
+        
+        Returns the number of deleted documents.
+        """
+        store = self._get_store(collection_target)
+        try:
+            # Query for matching documents to get their IDs
+            result = store._collection.get(
+                where={"source_filename": filename},
+                include=[]
+            )
+            if result and result.get("ids"):
+                ids_to_delete = result["ids"]
+                store.delete(ids=ids_to_delete)
+                logger.info(
+                    "Deleted %d documents for file '%s' from '%s' collection.",
+                    len(ids_to_delete),
+                    filename,
+                    collection_target,
+                )
+                return len(ids_to_delete)
+        except Exception as e:
+            logger.error(
+                "Failed to delete file '%s' from '%s' collection: %s",
+                filename,
+                collection_target,
+                e,
+                exc_info=True,
+            )
+        return 0
 
     # ── Query ──────────────────────────────────────────────────────────
 
@@ -120,8 +162,8 @@ class DualVectorStore:
         return store._collection.count()
 
     def get_all_sources(self) -> list[dict]:
-        """Return a list of unique source filenames across both collections."""
-        sources: dict[str, str] = {}  # filename → file_type
+        """Return a list of unique source filenames across both collections with document counts."""
+        sources: dict[str, dict] = {}  # filename → {"filename": str, "file_type": str, "doc_count": int}
 
         for target in ("narrative", "structured"):
             store = self._get_store(target)
@@ -131,14 +173,17 @@ class DualVectorStore:
                     for meta in result["metadatas"]:
                         fname = meta.get("source_filename", "unknown")
                         ftype = meta.get("file_type", "unknown")
-                        sources[fname] = ftype
-            except Exception:
-                pass
+                        if fname not in sources:
+                            sources[fname] = {
+                                "filename": fname,
+                                "file_type": ftype,
+                                "doc_count": 0,
+                            }
+                        sources[fname]["doc_count"] += 1
+            except Exception as e:
+                logger.warning("Failed to get sources from '%s': %s", target, e)
 
-        return [
-            {"filename": fname, "file_type": ftype}
-            for fname, ftype in sources.items()
-        ]
+        return list(sources.values())
 
     # ── Clear ──────────────────────────────────────────────────────────
 

@@ -81,6 +81,27 @@ def run_tests():
         assert narrative_count > 0, "Narrative store should not be empty!"
         assert structured_count > 0, "Structured store should not be empty!"
 
+        # ── Test Idempotency (Delete-before-insert & deterministic IDs) ──
+        print("\nTesting Idempotency (uploading the same files again)...")
+        # Ingest and index again
+        docs, collection_target = ingest_file(os.path.join(DATA_DIR, "tech_company_ratios.csv"), "tech_company_ratios.csv")
+        
+        # Test count before
+        count_before = vector_store.get_document_count(collection_target)
+        
+        # Delete old
+        deleted = vector_store.delete_file("tech_company_ratios.csv", collection_target)
+        print(f"  Deleted count: {deleted} (expected: {structured_count})")
+        assert deleted == structured_count, f"Deleted count {deleted} does not match structured count {structured_count}!"
+        
+        # Insert again
+        vector_store.add_documents(docs, collection_target)
+        
+        # Test count after
+        count_after = vector_store.get_document_count(collection_target)
+        print(f"  Count before: {count_before} | Count after: {count_after}")
+        assert count_before == count_after, f"Collection count changed on duplicate insert! {count_before} != {count_after}"
+
         # ── Test 1: Query that matches Narrative ───────────────────────
         query_1 = "What was Services revenue in Q4 2024?"
         print(f"\nRunning Query 1 (Narrative match): '{query_1}'")

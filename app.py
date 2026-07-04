@@ -155,7 +155,11 @@ def _init_session_state():
             st.session_state.vector_store = DualVectorStore(embedding_fn)
 
     if "processed_files" not in st.session_state:
-        st.session_state.processed_files = []  # list of {"filename", "file_type", "doc_count"}
+        # Populate processed_files from database on startup
+        st.session_state.processed_files = st.session_state.vector_store.get_all_sources()
+
+    if "processed_uploads" not in st.session_state:
+        st.session_state.processed_uploads = set()
 
 
 _init_session_state()
@@ -181,11 +185,16 @@ with st.sidebar:
 
     # ── Process uploaded files ─────────────────────────────────────────
     if uploaded_files:
-        # Track which files have already been processed this session
-        already_processed = {f["filename"] for f in st.session_state.processed_files}
+        # Keep only processed uploads that are still present in the file uploader
+        current_names = {f.name for f in uploaded_files}
+        st.session_state.processed_uploads = {
+            uid for uid in st.session_state.processed_uploads
+            if uid.split("_")[0] in current_names
+        }
 
         for uploaded_file in uploaded_files:
-            if uploaded_file.name not in already_processed:
+            upload_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            if upload_id not in st.session_state.processed_uploads:
                 with st.spinner(f"Processing {uploaded_file.name}..."):
                     try:
                         # Read file bytes into a BytesIO buffer
@@ -203,21 +212,38 @@ with st.sidebar:
                             )
                             continue
 
+                        # Retrieve document count before upload
+                        count_before = st.session_state.vector_store.get_document_count(collection_target)
+
+                        # Implement Delete-Before-Insert (Idempotent Uploads)
+                        deleted_count = st.session_state.vector_store.delete_file(
+                            uploaded_file.name, collection_target
+                        )
+
                         # Index into vector store
                         st.session_state.vector_store.add_documents(
                             documents, collection_target
                         )
 
-                        # Track processed file
-                        st.session_state.processed_files.append(
-                            {
-                                "filename": uploaded_file.name,
-                                "file_type": documents[0].metadata.get(
-                                    "file_type", "unknown"
-                                ),
-                                "doc_count": len(documents),
-                            }
+                        # Retrieve document count after upload
+                        count_after = st.session_state.vector_store.get_document_count(collection_target)
+
+                        # Log verification metrics
+                        logger.info(
+                            f"\n--- Indexing Metrics for {uploaded_file.name} ---\n"
+                            f"Collection target: {collection_target}\n"
+                            f"Document count before upload: {count_before}\n"
+                            f"Number of deleted vectors: {deleted_count}\n"
+                            f"Number of inserted vectors: {len(documents)}\n"
+                            f"Document count after upload: {count_after}\n"
+                            f"----------------------------------------"
                         )
+
+                        # Track processed upload in current session
+                        st.session_state.processed_uploads.add(upload_id)
+
+                        # Synchronize session state from ChromaDB (single source of truth)
+                        st.session_state.processed_files = st.session_state.vector_store.get_all_sources()
 
                         st.success(f"✅ {uploaded_file.name} processed successfully!")
 
@@ -246,6 +272,7 @@ with st.sidebar:
         if st.button("🗑️ Clear All Documents", use_container_width=True):
             st.session_state.vector_store.clear_all()
             st.session_state.processed_files = []
+            st.session_state.processed_uploads = set()
             st.session_state.messages = []
             st.rerun()
 
