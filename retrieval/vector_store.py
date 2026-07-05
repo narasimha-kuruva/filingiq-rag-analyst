@@ -140,6 +140,12 @@ class DualVectorStore:
                 "successful": False
             }
             
+        # Log metadata immediately before validation
+        logger.info("Collection: %s", collection_target)
+        logger.info("Documents: %d", len(documents))
+        logger.info("First metadata: %s", documents[0].metadata)
+        logger.info("Metadata keys: %s", list(documents[0].metadata.keys()) if documents[0].metadata else [])
+
         filenames = set()
         for i, doc in enumerate(documents):
             if not isinstance(doc, Document):
@@ -299,10 +305,6 @@ class DualVectorStore:
                 }
 
         # 4. Insert the new documents
-        if documents:
-            logger.info("Collection: %s", collection_target)
-            logger.info("Documents: %d", len(documents))
-            logger.info("First metadata: %s", documents[0].metadata)
 
         try:
             store.add_documents(documents, ids=ids)
