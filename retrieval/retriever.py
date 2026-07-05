@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
 
-from config import TOP_K, SIMILARITY_THRESHOLD, REFUSAL_MESSAGE
+from config import TOP_K, NARRATIVE_SIMILARITY_THRESHOLD, STRUCTURED_SIMILARITY_THRESHOLD, REFUSAL_MESSAGE
 from retrieval.vector_store import DualVectorStore
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,25 @@ def is_greeting_query(query: str) -> bool:
             return True
 
     return False
+
+
+def _rerank_candidates(query: str, candidates: list[dict]) -> list[dict]:
+    """
+    Placeholder for a future reranking stage.
+
+    Parameters
+    ----------
+    query : str
+        The user's query.
+    candidates : list[dict]
+        Retrieved candidate documents with similarity scores.
+
+    Returns
+    -------
+    list[dict]
+        The list of candidates, unmodified.
+    """
+    return candidates
 
 
 def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
@@ -104,93 +123,86 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
             is_greeting=True,
         )
 
-    all_results: list[tuple[Document, float, str]] = []  # (doc, score, origin)
+    # ── Phase 1: Vector Search (Candidate Retrieval) ───────────────────
+    candidates: list[dict] = []
 
-    # ── Search both collections ────────────────────────────────────────
     for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
         try:
             count = vector_store.get_document_count(target)
-            
-            # 2. COLLECTION STATISTICS
-            logger.info(
-                f"Collection: {target}\n"
-                f"Documents indexed: {count}\n"
-                f"Top-K: {TOP_K}"
-            )
-
-            if count == 0:
-                logger.info(
-                    f"Threshold: {SIMILARITY_THRESHOLD}\n"
-                    f"Number of retrieved chunks in '{target}': 0\n"
-                    f"Number of discarded chunks in '{target}': 0\n"
-                    f"Number of retained chunks in '{target}': 0"
+            results = []
+            if count > 0:
+                results = vector_store.similarity_search_with_score(
+                    query, collection_target=target, k=TOP_K
                 )
-                continue
 
-            results = vector_store.similarity_search_with_score(
-                query, collection_target=target, k=TOP_K
-            )
-
-            if not results:
-                logger.info(
-                    f"Threshold: {SIMILARITY_THRESHOLD}\n"
-                    f"Number of retrieved chunks in '{target}': 0\n"
-                    f"Number of discarded chunks in '{target}': 0\n"
-                    f"Number of retained chunks in '{target}': 0"
-                )
-                continue
-
-            retrieved_count = len(results)
-            retained_chunks = []
-            discarded_chunks = []
-
-            # Check best score against threshold
-            best_score = max(score for _, score in results)
-
-            if best_score < SIMILARITY_THRESHOLD:
-                # All chunks in this collection are discarded
-                for doc, score in results:
-                    discarded_chunks.append({
-                        "score": score,
-                        "reason": f"Best score in collection '{target}' ({best_score:.4f}) is below threshold ({SIMILARITY_THRESHOLD:.4f})"
-                    })
-            else:
-                for doc, score in results:
-                    if score >= SIMILARITY_THRESHOLD:
-                        retained_chunks.append((doc, score))
-                        all_results.append((doc, score, label))
-                    else:
-                        discarded_chunks.append({
-                            "score": score,
-                            "reason": f"Individual chunk score ({score:.4f}) is below threshold ({SIMILARITY_THRESHOLD:.4f})"
-                        })
-
-            # 4. THRESHOLD FILTERING
-            logger.info(
-                f"Threshold: {SIMILARITY_THRESHOLD}\n"
-                f"Number of retrieved chunks in '{target}': {retrieved_count}\n"
-                f"Number of discarded chunks in '{target}': {len(discarded_chunks)}\n"
-                f"Number of retained chunks in '{target}': {len(retained_chunks)}"
-            )
-
-            for idx, (doc, score) in enumerate(results, start=1):
-                is_kept = any(r[0] == doc for r in retained_chunks)
-                status = "KEPT" if is_kept else "DISCARDED"
-                msg = (
-                    f"Chunk #{idx}\n"
-                    f"Similarity: {score:.4f}\n"
-                    f"Status: {status}"
-                )
-                if not is_kept:
-                    reason = next((d["reason"] for d in discarded_chunks if d["score"] == score), "Below threshold")
-                    msg += f"\nReason: {reason}"
-                logger.info(msg)
+            for doc, score in results:
+                candidates.append({
+                    "doc": doc,
+                    "score": score,
+                    "collection": target,
+                    "origin": label
+                })
 
         except Exception as e:
-            logger.warning("Error searching '%s' collection: %s", target, e)
+            logger.warning("Error searching '%s' collection during search phase: %s", target, e)
 
-    # ── Nothing relevant found ─────────────────────────────────────────
-    if not all_results:
+    # ── Phase 2: Reranking Step (Optional Placeholder) ─────────────────
+    candidates = _rerank_candidates(query, candidates)
+
+    # ── Phase 3: Threshold Filtering & Logging ──────────────────────────
+    retained_candidates: list[dict] = []
+
+    for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
+        # Determine target threshold
+        if target == "narrative":
+            threshold = NARRATIVE_SIMILARITY_THRESHOLD
+        else:
+            threshold = STRUCTURED_SIMILARITY_THRESHOLD
+
+        # Filter candidates belonging to this collection
+        coll_candidates = [c for c in candidates if c["collection"] == target]
+
+        retained = []
+        discarded = []
+
+        scores = [c["score"] for c in coll_candidates]
+        highest_score = max(scores) if scores else None
+        lowest_score = min(scores) if scores else None
+
+        for item in coll_candidates:
+            if item["score"] >= threshold:
+                retained.append(item)
+                retained_candidates.append(item)
+            else:
+                discarded.append(item)
+
+        # Log detailed audit diagnostics
+        logger.info(
+            f"Collection: {target}\n"
+            f"Threshold: {threshold:.4f}\n"
+            f"Top-K requested: {TOP_K}\n"
+            f"Retrieved count: {len(coll_candidates)}\n"
+            f"Retained count: {len(retained)}\n"
+            f"Discarded count: {len(discarded)}\n"
+            f"Highest similarity: {f'{highest_score:.4f}' if highest_score is not None else 'None'}\n"
+            f"Lowest similarity: {f'{lowest_score:.4f}' if lowest_score is not None else 'None'}"
+        )
+
+        # Log details of each candidate from this collection
+        for idx, item in enumerate(coll_candidates, start=1):
+            is_kept = item in retained
+            status = "KEPT" if is_kept else "DISCARDED"
+            msg = (
+                f"Chunk #{idx}\n"
+                f"Similarity: {item['score']:.4f}\n"
+                f"Status: {status}"
+            )
+            if not is_kept:
+                msg += f"\nReason: Individual chunk score ({item['score']:.4f}) is below threshold ({threshold:.4f})"
+            logger.info(msg)
+
+    # ── Phase 4: Context Generation ────────────────────────────────────
+    if not retained_candidates:
         # 5. FINAL CONTEXT SENT TO GEMINI
         logger.info(
             "==================================================\n"
@@ -204,13 +216,16 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
             is_relevant=False,
         )
 
-    # ── Sort by score (highest first) and build context ────────────────
-    all_results.sort(key=lambda x: x[1], reverse=True)
+    # Sort all retained candidates by score descending
+    retained_candidates.sort(key=lambda x: x["score"], reverse=True)
 
     context_parts: list[str] = []
     sources: list[dict] = []
 
-    for doc, score, label in all_results:
+    for item in retained_candidates:
+        doc = item["doc"]
+        score = item["score"]
+        label = item["origin"]
         context_parts.append(f"[{label}] {doc.page_content}")
         sources.append(
             {

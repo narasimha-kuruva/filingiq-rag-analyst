@@ -13,7 +13,9 @@ CHUNK_OVERLAP = 150
 
 # ─── Retrieval ──────────────────────────────────────────────────────────────
 TOP_K = 4
-SIMILARITY_THRESHOLD = 0.50  # cosine; discard collection results below this
+SIMILARITY_THRESHOLD = 0.50  # cosine; fallback threshold
+NARRATIVE_SIMILARITY_THRESHOLD = 0.50
+STRUCTURED_SIMILARITY_THRESHOLD = 0.45
 
 # ─── LLM ────────────────────────────────────────────────────────────────────
 LLM_MODEL = "gemini-2.5-flash"
