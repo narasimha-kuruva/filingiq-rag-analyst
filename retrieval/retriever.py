@@ -14,9 +14,7 @@ be wrapped as a LangChain/LangGraph tool for the agentic layer.
 import logging
 from dataclasses import dataclass, field
 
-from langchain_core.documents import Document
-
-from config import RETRIEVAL_POLICIES, REFUSAL_MESSAGE
+from config import RETRIEVAL_POLICIES
 from retrieval.vector_store import DualVectorStore
 
 logger = logging.getLogger(__name__)
@@ -60,17 +58,69 @@ def is_greeting_query(query: str) -> bool:
     return False
 
 
-def _retrieve_candidates(query: str, vector_store: DualVectorStore) -> list[dict]:
+def rerank_candidates(query: str, candidates: list[dict]) -> list[dict]:
     """
-    Vector Search Phase. Retrieves top_k candidate documents.
+    Placeholder for a future reranking stage.
+    Must not modify candidate order or scores. It simply returns the candidates unchanged.
+    Its purpose is to establish a stable extension point for future reranking implementations.
     """
+    return candidates
+
+
+def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
+    """
+    Search both collections and return merged, filtered context.
+
+    Parameters
+    ----------
+    query : str
+        The user's natural-language question.
+    vector_store : DualVectorStore
+        Initialized dual-collection vector store.
+
+    Returns
+    -------
+    RetrievalResult
+        Contains formatted context, source metadata, and relevance flag.
+    """
+    import datetime
+    is_greeting = is_greeting_query(query)
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. QUERY LOGGING
+    logger.info(
+        f"==================================================\n"
+        f"QUERY\n"
+        f"==================================================\n"
+        f"Timestamp: {timestamp_str}\n"
+        f"Question:\n{query}\n\n"
+        f"Greeting:\n{is_greeting}"
+    )
+
+    if is_greeting:
+        logger.info(
+            "==================================================\n"
+            "FINAL CONTEXT SENT TO GEMINI\n"
+            "==================================================\n"
+            "<Greeting query detected - Short-circuiting directly to greeting generation>"
+        )
+        return RetrievalResult(
+            context="",
+            sources=[],
+            is_relevant=True,
+            is_greeting=True,
+        )
+
+    # ── Phase 1: Vector Search (Candidate Retrieval) ───────────────────
     candidates: list[dict] = []
+    indexed_document_counts: dict[str, int] = {}
 
     for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
         try:
             policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
             top_k = policy.get("top_k", 4)
             count = vector_store.get_document_count(target)
+            indexed_document_counts[target] = count
 
             results = []
             if count > 0:
@@ -89,33 +139,19 @@ def _retrieve_candidates(query: str, vector_store: DualVectorStore) -> list[dict
 
         except Exception as e:
             logger.warning("Error searching '%s' collection during search phase: %s", target, e)
+            indexed_document_counts[target] = 0
 
-    return candidates
+    # ── Phase 2: Optional Future Reranking ─────────────────────────────
+    candidates = rerank_candidates(query, candidates)
 
-
-def _rerank_candidates(query: str, candidates: list[dict]) -> list[dict]:
-    """
-    Placeholder for a future reranking stage.
-    Currently returns the candidate list unmodified.
-    """
-    return candidates
-
-
-def _filter_candidates(query: str, candidates: list[dict], vector_store: DualVectorStore) -> list[dict]:
-    """
-    Filter candidates against thresholds defined in RETRIEVAL_POLICIES.
-    """
+    # ── Phase 3: Filtering & Diagnostics Logging ───────────────────────
     retained_candidates: list[dict] = []
 
     for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
         policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
         threshold = policy.get("threshold", 0.50)
         top_k = policy.get("top_k", 4)
-
-        try:
-            indexed_count = vector_store.get_document_count(target)
-        except Exception:
-            indexed_count = 0
+        indexed_count = indexed_document_counts.get(target, 0)
 
         # Filter candidates belonging to this collection
         coll_candidates = [c for c in candidates if c["collection"] == target]
@@ -172,15 +208,20 @@ def _filter_candidates(query: str, candidates: list[dict], vector_store: DualVec
                 msg += f"\nReason: Individual chunk score ({item['score']:.4f}) is below threshold ({threshold:.4f})"
             logger.info(msg)
 
-    return retained_candidates
-
-
-def _build_context(retained_candidates: list[dict]) -> tuple[str, list[dict]]:
-    """
-    Construct context and sources list from retained candidates.
-    """
+    # ── Phase 4: Context Construction ──────────────────────────────────
     if not retained_candidates:
-        return "", []
+        # 5. FINAL CONTEXT SENT TO GEMINI
+        logger.info(
+            "==================================================\n"
+            "FINAL CONTEXT SENT TO GEMINI\n"
+            "==================================================\n\n"
+            "<No relevant context found - Short-circuiting directly to refusal>"
+        )
+        return RetrievalResult(
+            context="",
+            sources=[],
+            is_relevant=False,
+        )
 
     # Sort all retained candidates by score descending
     retained_candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -205,78 +246,6 @@ def _build_context(retained_candidates: list[dict]) -> tuple[str, list[dict]]:
         )
 
     context = "\n\n---\n\n".join(context_parts)
-    return context, sources
-
-
-def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
-    """
-    Search both collections and return merged, filtered context.
-
-    Parameters
-    ----------
-    query : str
-        The user's natural-language question.
-    vector_store : DualVectorStore
-        Initialized dual-collection vector store.
-
-    Returns
-    -------
-    RetrievalResult
-        Contains formatted context, source metadata, and relevance flag.
-    """
-    import datetime
-    is_greeting = is_greeting_query(query)
-    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 1. QUERY LOGGING
-    logger.info(
-        f"==================================================\n"
-        f"QUERY\n"
-        f"==================================================\n"
-        f"Timestamp: {timestamp_str}\n"
-        f"Question:\n{query}\n\n"
-        f"Greeting:\n{is_greeting}"
-    )
-
-    if is_greeting:
-        logger.info(
-            "==================================================\n"
-            "FINAL CONTEXT SENT TO GEMINI\n"
-            "==================================================\n"
-            "<Greeting query detected - Short-circuiting directly to greeting generation>"
-        )
-        return RetrievalResult(
-            context="",
-            sources=[],
-            is_relevant=True,
-            is_greeting=True,
-        )
-
-    # ── Phase 1: Vector Search (Candidate Retrieval) ───────────────────
-    candidates = _retrieve_candidates(query, vector_store)
-
-    # ── Phase 2: Reranking Step (Optional Placeholder) ─────────────────
-    candidates = _rerank_candidates(query, candidates)
-
-    # ── Phase 3: Filtering & Diagnostics Logging ───────────────────────
-    retained = _filter_candidates(query, candidates, vector_store)
-
-    # ── Phase 4: Context Construction ──────────────────────────────────
-    context, sources = _build_context(retained)
-
-    if not context:
-        # 5. FINAL CONTEXT SENT TO GEMINI
-        logger.info(
-            "==================================================\n"
-            "FINAL CONTEXT SENT TO GEMINI\n"
-            "==================================================\n\n"
-            "<No relevant context found - Short-circuiting directly to refusal>"
-        )
-        return RetrievalResult(
-            context="",
-            sources=[],
-            is_relevant=False,
-        )
 
     # 5. FINAL CONTEXT SENT TO GEMINI
     logger.info(
