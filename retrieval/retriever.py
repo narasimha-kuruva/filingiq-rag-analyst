@@ -39,16 +39,6 @@ class RetrievalResult:
     """True if the query is a greeting or introductory question."""
 
 
-@dataclass
-class Candidate:
-    """Lightweight model representing a retrieved document candidate."""
-    document: Document
-    similarity: float
-    collection: str
-    origin: str
-    metadata: dict
-
-
 def is_greeting_query(query: str) -> bool:
     """Check if the user's query is a simple greeting or introductory question."""
     cleaned = query.strip().lower().strip("?!.,")
@@ -70,22 +60,152 @@ def is_greeting_query(query: str) -> bool:
     return False
 
 
-def _normalize_candidates(candidates: list[Candidate]) -> list[Candidate]:
+def _retrieve_candidates(query: str, vector_store: DualVectorStore) -> list[dict]:
     """
-    Candidate Normalization Stage.
-    Clamps similarity scores between 0.0 and 1.0.
+    Vector Search Phase. Retrieves top_k candidate documents.
     """
-    for c in candidates:
-        c.similarity = max(0.0, min(1.0, c.similarity))
+    candidates: list[dict] = []
+
+    for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
+        try:
+            policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
+            top_k = policy.get("top_k", 4)
+            count = vector_store.get_document_count(target)
+
+            results = []
+            if count > 0:
+                results = vector_store.similarity_search_with_score(
+                    query, collection_target=target, k=top_k
+                )
+
+            for doc, score in results:
+                candidates.append({
+                    "doc": doc,
+                    "score": score,
+                    "collection": target,
+                    "origin": label,
+                    "metadata": doc.metadata.copy() if doc.metadata else {}
+                })
+
+        except Exception as e:
+            logger.warning("Error searching '%s' collection during search phase: %s", target, e)
+
     return candidates
 
 
-def _rerank_candidates(query: str, candidates: list[Candidate]) -> list[Candidate]:
+def _rerank_candidates(query: str, candidates: list[dict]) -> list[dict]:
     """
     Placeholder for a future reranking stage.
     Currently returns the candidate list unmodified.
     """
     return candidates
+
+
+def _filter_candidates(query: str, candidates: list[dict], vector_store: DualVectorStore) -> list[dict]:
+    """
+    Filter candidates against thresholds defined in RETRIEVAL_POLICIES.
+    """
+    retained_candidates: list[dict] = []
+
+    for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
+        policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
+        threshold = policy.get("threshold", 0.50)
+        top_k = policy.get("top_k", 4)
+
+        try:
+            indexed_count = vector_store.get_document_count(target)
+        except Exception:
+            indexed_count = 0
+
+        # Filter candidates belonging to this collection
+        coll_candidates = [c for c in candidates if c["collection"] == target]
+
+        retained = []
+        discarded = []
+
+        scores = [c["score"] for c in coll_candidates]
+        highest_score = max(scores) if scores else 0.0
+        lowest_score = min(scores) if scores else 0.0
+        average_score = sum(scores) / len(scores) if scores else 0.0
+
+        for item in coll_candidates:
+            if item["score"] >= threshold:
+                retained.append(item)
+                retained_candidates.append(item)
+            else:
+                discarded.append(item)
+
+        # Determine failure reason if applicable
+        failure_reason = "None"
+        if indexed_count == 0 or not coll_candidates:
+            failure_reason = "RETRIEVAL_FAILURE"
+        elif not retained:
+            failure_reason = "THRESHOLD_FAILURE"
+
+        # Log detailed diagnostics as requested
+        logger.info(
+            f"--- Retrieval Diagnostics for {target.upper()} ---\n"
+            f"Query: {query}\n"
+            f"Collection Name: {target}\n"
+            f"Retrieval Policy: {policy}\n"
+            f"Top-K: {top_k}\n"
+            f"Number of Indexed Documents: {indexed_count}\n"
+            f"Retrieved Candidate Count: {len(coll_candidates)}\n"
+            f"Retained Candidate Count: {len(retained)}\n"
+            f"Discarded Candidate Count: {len(discarded)}\n"
+            f"Highest Similarity: {highest_score:.4f}\n"
+            f"Lowest Similarity: {lowest_score:.4f}\n"
+            f"Average Similarity: {average_score:.4f}\n"
+            f"Failure Reason: {failure_reason}"
+        )
+
+        # Log chunk-level status details
+        for idx, item in enumerate(coll_candidates, start=1):
+            is_kept = item in retained
+            status = "KEPT" if is_kept else "DISCARDED"
+            msg = (
+                f"Chunk #{idx}\n"
+                f"Similarity: {item['score']:.4f}\n"
+                f"Status: {status}"
+            )
+            if not is_kept:
+                msg += f"\nReason: Individual chunk score ({item['score']:.4f}) is below threshold ({threshold:.4f})"
+            logger.info(msg)
+
+    return retained_candidates
+
+
+def _build_context(retained_candidates: list[dict]) -> tuple[str, list[dict]]:
+    """
+    Construct context and sources list from retained candidates.
+    """
+    if not retained_candidates:
+        return "", []
+
+    # Sort all retained candidates by score descending
+    retained_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    context_parts: list[str] = []
+    sources: list[dict] = []
+
+    for item in retained_candidates:
+        doc = item["doc"]
+        score = item["score"]
+        label = item["origin"]
+        context_parts.append(f"[{label}] {doc.page_content}")
+        sources.append(
+            {
+                **item["metadata"],
+                "similarity_score": round(score, 4),
+                "origin": label,
+                "content_preview": doc.page_content[:200] + "..."
+                if len(doc.page_content) > 200
+                else doc.page_content,
+            }
+        )
+
+    context = "\n\n---\n\n".join(context_parts)
+    return context, sources
 
 
 def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
@@ -133,104 +253,18 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
         )
 
     # ── Phase 1: Vector Search (Candidate Retrieval) ───────────────────
-    candidates: list[Candidate] = []
+    candidates = _retrieve_candidates(query, vector_store)
 
-    for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
-        try:
-            policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
-            top_k = policy.get("top_k", 4)
-            count = vector_store.get_document_count(target)
-
-            results = []
-            if count > 0:
-                results = vector_store.similarity_search_with_score(
-                    query, collection_target=target, k=top_k
-                )
-
-            for doc, score in results:
-                candidates.append(
-                    Candidate(
-                        document=doc,
-                        similarity=score,
-                        collection=target,
-                        origin=label,
-                        metadata=doc.metadata.copy() if doc.metadata else {}
-                    )
-                )
-
-        except Exception as e:
-            logger.warning("Error searching '%s' collection during search phase: %s", target, e)
-
-    # ── Phase 2: Candidate Normalization ───────────────────────────────
-    candidates = _normalize_candidates(candidates)
-
-    # ── Phase 3: Optional Future Reranking ─────────────────────────────
+    # ── Phase 2: Reranking Step (Optional Placeholder) ─────────────────
     candidates = _rerank_candidates(query, candidates)
 
-    # ── Phase 4: Filtering & Diagnostics Logging ───────────────────────
-    retained_candidates: list[Candidate] = []
+    # ── Phase 3: Filtering & Diagnostics Logging ───────────────────────
+    retained = _filter_candidates(query, candidates, vector_store)
 
-    for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
-        policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
-        threshold = policy.get("threshold", 0.50)
-        top_k = policy.get("top_k", 4)
+    # ── Phase 4: Context Construction ──────────────────────────────────
+    context, sources = _build_context(retained)
 
-        # Filter candidates belonging to this collection
-        coll_candidates = [c for c in candidates if c.collection == target]
-
-        retained = []
-        discarded = []
-
-        scores = [c.similarity for c in coll_candidates]
-        highest_score = max(scores) if scores else 0.0
-        lowest_score = min(scores) if scores else 0.0
-        average_score = sum(scores) / len(scores) if scores else 0.0
-
-        for item in coll_candidates:
-            if item.similarity >= threshold:
-                retained.append(item)
-                retained_candidates.append(item)
-            else:
-                discarded.append(item)
-
-        # Log detailed diagnostics as requested
-        logger.info(
-            f"--- Retrieval Diagnostics for {target.upper()} ---\n"
-            f"Query: {query}\n"
-            f"Collection: {target}\n"
-            f"Retrieval Policy: {policy}\n"
-            f"Top-K: {top_k}\n"
-            f"Retrieved Candidates: {len(coll_candidates)}\n"
-            f"Retained Candidates: {len(retained)}\n"
-            f"Discarded Candidates: {len(discarded)}\n"
-            f"Highest Similarity: {highest_score:.4f}\n"
-            f"Lowest Similarity: {lowest_score:.4f}\n"
-            f"Average Similarity: {average_score:.4f}"
-        )
-
-        # Classify and log failure diagnostic labels explicitly
-        if not coll_candidates:
-            logger.info("Diagnostics Status: RETRIEVAL_FAILURE - No candidate results returned from vector search.")
-        elif not retained:
-            logger.info("Diagnostics Status: THRESHOLD_FAILURE - Candidates retrieved but all failed similarity threshold.")
-        else:
-            logger.info("Diagnostics Status: SUCCESS - Retrieval and threshold filtering succeeded.")
-
-        # Log chunk-level status details
-        for idx, item in enumerate(coll_candidates, start=1):
-            is_kept = item in retained
-            status = "KEPT" if is_kept else "DISCARDED"
-            msg = (
-                f"Chunk #{idx}\n"
-                f"Similarity: {item.similarity:.4f}\n"
-                f"Status: {status}"
-            )
-            if not is_kept:
-                msg += f"\nReason: Individual chunk score ({item.similarity:.4f}) is below threshold ({threshold:.4f})"
-            logger.info(msg)
-
-    # ── Phase 5: Context Construction ──────────────────────────────────
-    if not retained_candidates:
+    if not context:
         # 5. FINAL CONTEXT SENT TO GEMINI
         logger.info(
             "==================================================\n"
@@ -243,30 +277,6 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
             sources=[],
             is_relevant=False,
         )
-
-    # Sort all retained candidates by score descending
-    retained_candidates.sort(key=lambda x: x.similarity, reverse=True)
-
-    context_parts: list[str] = []
-    sources: list[dict] = []
-
-    for item in retained_candidates:
-        doc = item.document
-        score = item.similarity
-        label = item.origin
-        context_parts.append(f"[{label}] {doc.page_content}")
-        sources.append(
-            {
-                **item.metadata,
-                "similarity_score": round(score, 4),
-                "origin": label,
-                "content_preview": doc.page_content[:200] + "..."
-                if len(doc.page_content) > 200
-                else doc.page_content,
-            }
-        )
-
-    context = "\n\n---\n\n".join(context_parts)
 
     # 5. FINAL CONTEXT SENT TO GEMINI
     logger.info(
