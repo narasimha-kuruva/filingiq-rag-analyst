@@ -145,8 +145,7 @@ All tunable parameters are centralized in [`config.py`](config.py):
 |-----------|---------|-------------|
 | `CHUNK_SIZE` | 1000 | Character count per text chunk |
 | `CHUNK_OVERLAP` | 150 | Overlap between adjacent chunks |
-| `TOP_K` | 4 | Number of results per collection |
-| `SIMILARITY_THRESHOLD` | `0.50` | Minimum cosine similarity to keep results |
+| `RETRIEVAL_POLICIES` | dict | Baseline default similarity thresholds and Top-K lookups per collection |
 | `LLM_MODEL` | `gemini-2.5-flash` | Google Gemini model |
 | `TEMPERATURE` | 0.15 | LLM temperature (low = less creative drift) |
 | `EMBEDDING_MODEL` | `models/embedding-001` | Primary embedding model |
