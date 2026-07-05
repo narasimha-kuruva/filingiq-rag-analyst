@@ -178,6 +178,15 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
         elif not retained:
             failure_reason = "THRESHOLD_FAILURE"
 
+        # Prepare sorted score lists for logging
+        retrieved_scores_desc = sorted([c["score"] for c in coll_candidates], reverse=True)
+        accepted_scores_desc = sorted([c["score"] for c in retained], reverse=True)
+        rejected_scores_desc = sorted([c["score"] for c in discarded], reverse=True)
+
+        retrieved_scores_str = "\n".join([f"{s:.4f}" for s in retrieved_scores_desc]) if retrieved_scores_desc else "None"
+        accepted_scores_str = "\n".join([f"{s:.4f}" for s in accepted_scores_desc]) if accepted_scores_desc else "None"
+        rejected_scores_str = "\n".join([f"{s:.4f}" for s in rejected_scores_desc]) if rejected_scores_desc else "None"
+
         # Log detailed diagnostics as requested
         logger.info(
             f"--- Retrieval Diagnostics for {target.upper()} ---\n"
@@ -192,7 +201,11 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
             f"Highest Similarity: {highest_score:.4f}\n"
             f"Lowest Similarity: {lowest_score:.4f}\n"
             f"Average Similarity: {average_score:.4f}\n"
-            f"Failure Reason: {failure_reason}"
+            f"Failure Reason: {failure_reason}\n\n"
+            f"Retrieved:\n{retrieved_scores_str}\n\n"
+            f"Threshold:\n{threshold:.4f}\n\n"
+            f"Accepted:\n{accepted_scores_str}\n\n"
+            f"Rejected:\n{rejected_scores_str}"
         )
 
         # Log chunk-level status details
