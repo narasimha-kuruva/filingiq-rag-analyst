@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
 
-from config import TOP_K, NARRATIVE_SIMILARITY_THRESHOLD, STRUCTURED_SIMILARITY_THRESHOLD, REFUSAL_MESSAGE
+from config import RETRIEVAL_POLICIES, REFUSAL_MESSAGE
 from retrieval.vector_store import DualVectorStore
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,16 @@ class RetrievalResult:
 
     is_greeting: bool = False
     """True if the query is a greeting or introductory question."""
+
+
+@dataclass
+class Candidate:
+    """Lightweight model representing a retrieved document candidate."""
+    document: Document
+    similarity: float
+    collection: str
+    origin: str
+    metadata: dict
 
 
 def is_greeting_query(query: str) -> bool:
@@ -60,21 +70,20 @@ def is_greeting_query(query: str) -> bool:
     return False
 
 
-def _rerank_candidates(query: str, candidates: list[dict]) -> list[dict]:
+def _normalize_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    """
+    Candidate Normalization Stage.
+    Clamps similarity scores between 0.0 and 1.0.
+    """
+    for c in candidates:
+        c.similarity = max(0.0, min(1.0, c.similarity))
+    return candidates
+
+
+def _rerank_candidates(query: str, candidates: list[Candidate]) -> list[Candidate]:
     """
     Placeholder for a future reranking stage.
-
-    Parameters
-    ----------
-    query : str
-        The user's query.
-    candidates : list[dict]
-        Retrieved candidate documents with similarity scores.
-
-    Returns
-    -------
-    list[dict]
-        The list of candidates, unmodified.
+    Currently returns the candidate list unmodified.
     """
     return candidates
 
@@ -124,84 +133,103 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
         )
 
     # ── Phase 1: Vector Search (Candidate Retrieval) ───────────────────
-    candidates: list[dict] = []
+    candidates: list[Candidate] = []
 
     for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
         try:
+            policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
+            top_k = policy.get("top_k", 4)
             count = vector_store.get_document_count(target)
+
             results = []
             if count > 0:
                 results = vector_store.similarity_search_with_score(
-                    query, collection_target=target, k=TOP_K
+                    query, collection_target=target, k=top_k
                 )
 
             for doc, score in results:
-                candidates.append({
-                    "doc": doc,
-                    "score": score,
-                    "collection": target,
-                    "origin": label
-                })
+                candidates.append(
+                    Candidate(
+                        document=doc,
+                        similarity=score,
+                        collection=target,
+                        origin=label,
+                        metadata=doc.metadata.copy() if doc.metadata else {}
+                    )
+                )
 
         except Exception as e:
             logger.warning("Error searching '%s' collection during search phase: %s", target, e)
 
-    # ── Phase 2: Reranking Step (Optional Placeholder) ─────────────────
+    # ── Phase 2: Candidate Normalization ───────────────────────────────
+    candidates = _normalize_candidates(candidates)
+
+    # ── Phase 3: Optional Future Reranking ─────────────────────────────
     candidates = _rerank_candidates(query, candidates)
 
-    # ── Phase 3: Threshold Filtering & Logging ──────────────────────────
-    retained_candidates: list[dict] = []
+    # ── Phase 4: Filtering & Diagnostics Logging ───────────────────────
+    retained_candidates: list[Candidate] = []
 
     for target, label in [("narrative", "NARRATIVE"), ("structured", "STRUCTURED")]:
-        # Determine target threshold
-        if target == "narrative":
-            threshold = NARRATIVE_SIMILARITY_THRESHOLD
-        else:
-            threshold = STRUCTURED_SIMILARITY_THRESHOLD
+        policy = RETRIEVAL_POLICIES.get(target, {"threshold": 0.50, "top_k": 4})
+        threshold = policy.get("threshold", 0.50)
+        top_k = policy.get("top_k", 4)
 
         # Filter candidates belonging to this collection
-        coll_candidates = [c for c in candidates if c["collection"] == target]
+        coll_candidates = [c for c in candidates if c.collection == target]
 
         retained = []
         discarded = []
 
-        scores = [c["score"] for c in coll_candidates]
-        highest_score = max(scores) if scores else None
-        lowest_score = min(scores) if scores else None
+        scores = [c.similarity for c in coll_candidates]
+        highest_score = max(scores) if scores else 0.0
+        lowest_score = min(scores) if scores else 0.0
+        average_score = sum(scores) / len(scores) if scores else 0.0
 
         for item in coll_candidates:
-            if item["score"] >= threshold:
+            if item.similarity >= threshold:
                 retained.append(item)
                 retained_candidates.append(item)
             else:
                 discarded.append(item)
 
-        # Log detailed audit diagnostics
+        # Log detailed diagnostics as requested
         logger.info(
+            f"--- Retrieval Diagnostics for {target.upper()} ---\n"
+            f"Query: {query}\n"
             f"Collection: {target}\n"
-            f"Threshold: {threshold:.4f}\n"
-            f"Top-K requested: {TOP_K}\n"
-            f"Retrieved count: {len(coll_candidates)}\n"
-            f"Retained count: {len(retained)}\n"
-            f"Discarded count: {len(discarded)}\n"
-            f"Highest similarity: {f'{highest_score:.4f}' if highest_score is not None else 'None'}\n"
-            f"Lowest similarity: {f'{lowest_score:.4f}' if lowest_score is not None else 'None'}"
+            f"Retrieval Policy: {policy}\n"
+            f"Top-K: {top_k}\n"
+            f"Retrieved Candidates: {len(coll_candidates)}\n"
+            f"Retained Candidates: {len(retained)}\n"
+            f"Discarded Candidates: {len(discarded)}\n"
+            f"Highest Similarity: {highest_score:.4f}\n"
+            f"Lowest Similarity: {lowest_score:.4f}\n"
+            f"Average Similarity: {average_score:.4f}"
         )
 
-        # Log details of each candidate from this collection
+        # Classify and log failure diagnostic labels explicitly
+        if not coll_candidates:
+            logger.info("Diagnostics Status: RETRIEVAL_FAILURE - No candidate results returned from vector search.")
+        elif not retained:
+            logger.info("Diagnostics Status: THRESHOLD_FAILURE - Candidates retrieved but all failed similarity threshold.")
+        else:
+            logger.info("Diagnostics Status: SUCCESS - Retrieval and threshold filtering succeeded.")
+
+        # Log chunk-level status details
         for idx, item in enumerate(coll_candidates, start=1):
             is_kept = item in retained
             status = "KEPT" if is_kept else "DISCARDED"
             msg = (
                 f"Chunk #{idx}\n"
-                f"Similarity: {item['score']:.4f}\n"
+                f"Similarity: {item.similarity:.4f}\n"
                 f"Status: {status}"
             )
             if not is_kept:
-                msg += f"\nReason: Individual chunk score ({item['score']:.4f}) is below threshold ({threshold:.4f})"
+                msg += f"\nReason: Individual chunk score ({item.similarity:.4f}) is below threshold ({threshold:.4f})"
             logger.info(msg)
 
-    # ── Phase 4: Context Generation ────────────────────────────────────
+    # ── Phase 5: Context Construction ──────────────────────────────────
     if not retained_candidates:
         # 5. FINAL CONTEXT SENT TO GEMINI
         logger.info(
@@ -217,19 +245,19 @@ def retrieve(query: str, vector_store: DualVectorStore) -> RetrievalResult:
         )
 
     # Sort all retained candidates by score descending
-    retained_candidates.sort(key=lambda x: x["score"], reverse=True)
+    retained_candidates.sort(key=lambda x: x.similarity, reverse=True)
 
     context_parts: list[str] = []
     sources: list[dict] = []
 
     for item in retained_candidates:
-        doc = item["doc"]
-        score = item["score"]
-        label = item["origin"]
+        doc = item.document
+        score = item.similarity
+        label = item.origin
         context_parts.append(f"[{label}] {doc.page_content}")
         sources.append(
             {
-                **doc.metadata,
+                **item.metadata,
                 "similarity_score": round(score, 4),
                 "origin": label,
                 "content_preview": doc.page_content[:200] + "..."
