@@ -14,6 +14,8 @@ CHUNK_OVERLAP = 150
 # ─── Retrieval ──────────────────────────────────────────────────────────────
 TOP_K = 4
 SIMILARITY_THRESHOLD = 0.50  # cosine; fallback threshold
+# Baseline default retrieval policies. These similarity thresholds and search counts
+# are configurable defaults and can be adjusted based on retrieval evaluations.
 RETRIEVAL_POLICIES = {
     "narrative": {
         "threshold": 0.50,
