@@ -299,6 +299,11 @@ class DualVectorStore:
                 }
 
         # 4. Insert the new documents
+        if documents:
+            logger.info("Collection: %s", collection_target)
+            logger.info("Documents: %d", len(documents))
+            logger.info("First metadata: %s", documents[0].metadata)
+
         try:
             store.add_documents(documents, ids=ids)
         except Exception as e:

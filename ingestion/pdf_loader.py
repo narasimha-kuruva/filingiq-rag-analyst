@@ -42,6 +42,7 @@ def load_pdf(
     )
 
     documents: list[Document] = []
+    chunk_index = 0
 
     # pdfplumber accepts both file paths and file-like objects
     with pdfplumber.open(source) as pdf:
@@ -59,8 +60,10 @@ def load_pdf(
                             "source_filename": filename,
                             "file_type": "pdf",
                             "page_number": page_num,
+                            "chunk_index": chunk_index,
                         },
                     )
                 )
+                chunk_index += 1
 
     return documents

@@ -84,6 +84,7 @@ def load_docx(
 
     # ── Chunk each section ─────────────────────────────────────────────
     documents: list[Document] = []
+    chunk_counter = 0
     for section in sections:
         chunks = splitter.split_text(section["text"])
         for chunk_idx, chunk in enumerate(chunks):
@@ -95,8 +96,10 @@ def load_docx(
                         "file_type": "docx",
                         "section_title": section["title"],
                         "paragraph_index": section["start_para"] + chunk_idx,
+                        "chunk_index": chunk_counter,
                     },
                 )
             )
+            chunk_counter += 1
 
     return documents
